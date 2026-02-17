@@ -700,6 +700,11 @@ class debugger {
   }
   /// @brief pause
   void pause() { step_type_ = STEP_PAUSE; }
+  /// @brief pause immediately on next debug hook event
+  void pause_now() {
+    step_type_ = STEP_PAUSE;
+    pause_ = true;
+  }
   /// @brief unpause(continue)
   void unpause() {
     pause_ = false;
