@@ -29,8 +29,13 @@ using namespace boost::asio;
 // one to one server socket
 class command_stream_socket {
  public:
-  command_stream_socket(uint16_t port = 21110)
-      : endpoint_(asio::ip::tcp::v4(), port),
+  command_stream_socket(uint16_t port = 21110, bool loopback_only = false)
+      : loopback_only_(loopback_only),
+        endpoint_(loopback_only_
+                      ? asio::ip::tcp::endpoint(
+                            asio::ip::address(asio::ip::address_v4::loopback()),
+                            port)
+                      : asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)),
         acceptor_(io_service_, endpoint_),
         socket_(io_service_) {
     async_accept();
@@ -85,6 +90,17 @@ class command_stream_socket {
   void async_accept() {
     acceptor_.async_accept(socket_, [&](const asio::error_code& ec) {
       if (!ec) {
+        if (loopback_only_) {
+          // Defense-in-depth: even though we bind to loopback, reject any
+          // peer whose address is not loopback.
+          asio::error_code peer_ec;
+          const auto peer_addr = socket_.remote_endpoint(peer_ec).address();
+          if (peer_ec || !peer_addr.is_loopback()) {
+            socket_.close();
+            async_accept();
+            return;
+          }
+        }
         connected_done();
       } else {
         if (on_error) {
@@ -121,6 +137,7 @@ class command_stream_socket {
   }
 
   asio::io_service io_service_;
+  bool loopback_only_;
   asio::ip::tcp::endpoint endpoint_;
   asio::ip::tcp::acceptor acceptor_;
   asio::ip::tcp::socket socket_;
