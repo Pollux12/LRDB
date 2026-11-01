@@ -888,20 +888,42 @@ class debugger {
       }
     }
   }
-  void hookcall() {}
-  void hookret() {}
+  void hookcall() { call_line_ = -1; }
+  void hookret(lua_State* L) {
+    call_line_ = -1;
+    if (step_type_ == STEP_NONE && line_breakpoints_.empty()) {
+      return;
+    }
+    lua_Debug caller;
+    if (lua_getstack(L, 1, &caller) && lua_getinfo(L, "l", &caller)) {
+      call_line_ = caller.currentline;
+    }
+  }
+  /// LuaJIT reports a line event when a call returns into the line that made
+  /// it, though execution only resumes that line.
+  bool resumes_call_line() {
+    const int call_line = call_line_;
+    call_line_ = -1;
+    return call_line != -1 && call_line == current_debug_info_.currentline();
+  }
 
   void tick() {
     if (tick_handler_) {
       tick_handler_(*this);
     }
   }
-  void check_code_step_pause() {
+  void check_code_step_pause(bool resumes_call_line) {
     if (step_type_ == STEP_NONE) {
       return;
     }
 
     std::vector<stack_info> callstack = get_call_stack();
+    if (resumes_call_line && step_type_ != STEP_PAUSE) {
+      if (step_type_ != STEP_ENTRY && step_callstack_size_ > callstack.size()) {
+        pause_ = true;
+      }
+      return;
+    }
     switch (step_type_) {
       case STEP_OVER:
         if (step_callstack_size_ >= callstack.size()) {
@@ -929,16 +951,18 @@ class debugger {
     current_breakpoint_ = 0;
     tick();
 
-    if (!pause_ && ar->event == LUA_HOOKLINE) {
-      check_code_step_pause();
-    }
-
     if (ar->event == LUA_HOOKLINE) {
-      hookline();
+      const bool resumed = resumes_call_line();
+      if (!pause_) {
+        check_code_step_pause(resumed);
+      }
+      if (!resumed) {
+        hookline();
+      }
     } else if (ar->event == LUA_HOOKCALL) {
       hookcall();
     } else if (ar->event == LUA_HOOKRET) {
-      hookret();
+      hookret(L);
     }
     if (pause_ && pause_handler_) {
       step_callstack_size_ = 0;
@@ -977,6 +1001,7 @@ class debugger {
   debug_info current_debug_info_;
   line_breakpoint_type line_breakpoints_;
   breakpoint_info* current_breakpoint_;
+  int call_line_ = -1;
   pause_handler_type pause_handler_;
   tick_handler_type tick_handler_;
 };
