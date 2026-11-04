@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <functional>
 #include <string>
+#include <cstring>
 #include <vector>
 
 #include <cmath>
@@ -888,23 +889,60 @@ class debugger {
       }
     }
   }
-  void hookcall() { call_line_ = -1; }
-  void hookret(lua_State* L) {
-    call_line_ = -1;
-    if (step_type_ == STEP_NONE && line_breakpoints_.empty()) {
-      return;
-    }
+  typedef decltype(lua_Debug::i_ci) frame_key_type;
+  /// Identifies a stack frame from lua_Debug::i_ci. LuaJIT's lua_getstack
+  /// packs the frame size into the upper 16 bits, while a hook's record holds
+  /// only the frame's stack offset, so only the offset is compared there.
+  static frame_key_type frame_key(frame_key_type i_ci) {
+#ifdef LUA_JITLIBNAME
+    return i_ci & 0xffff;
+#else
+    return i_ci;
+#endif
+  }
+  /// Remembers the line and frame of the caller (stack level 1), which a
+  /// line event will report again once the call returns.
+  void remember_call_line(lua_State* L) {
     lua_Debug caller;
-    if (lua_getstack(L, 1, &caller) && lua_getinfo(L, "l", &caller)) {
+    if (lua_getstack(L, 1, &caller) && lua_getinfo(L, "l", &caller) &&
+        caller.currentline >= 0) {
       call_line_ = caller.currentline;
+      call_frame_ = frame_key(caller.i_ci);
     }
   }
+  /// LuaJIT reports no return event for C functions (math.max, pcall, ...),
+  /// yet still reports the caller's line again once one returns, so the call
+  /// is remembered when it is made.
+  void hookcall(lua_State* L, lua_Debug* ar) {
+    if (step_type_ == STEP_NONE && line_breakpoints_.empty()) {
+      call_line_ = -1;
+      return;
+    }
+    if (lua_getinfo(L, "S", ar) && ar->what != 0 &&
+        std::strcmp(ar->what, "C") == 0) {
+      remember_call_line(L);
+    }
+  }
+  void hookret(lua_State* L) {
+    if (step_type_ == STEP_NONE && line_breakpoints_.empty()) {
+      call_line_ = -1;
+      return;
+    }
+    // A Lua callback returning into a C function has no line to resume
+    // (currentline is -1), so the C function's own call stays remembered.
+    remember_call_line(L);
+  }
   /// LuaJIT reports a line event when a call returns into the line that made
-  /// it, though execution only resumes that line.
-  bool resumes_call_line() {
+  /// it, though execution only resumes that line. Only the frame that made
+  /// the call can resume it: a callback's lines (another frame) leave the
+  /// remembered call in place.
+  bool resumes_call_line(const lua_Debug* ar) {
+    if (call_line_ == -1 || frame_key(ar->i_ci) != call_frame_) {
+      return false;
+    }
     const int call_line = call_line_;
     call_line_ = -1;
-    return call_line != -1 && call_line == current_debug_info_.currentline();
+    return call_line == current_debug_info_.currentline();
   }
 
   void tick() {
@@ -952,7 +990,7 @@ class debugger {
     tick();
 
     if (ar->event == LUA_HOOKLINE) {
-      const bool resumed = resumes_call_line();
+      const bool resumed = resumes_call_line(ar);
       if (!pause_) {
         check_code_step_pause(resumed);
       }
@@ -960,7 +998,7 @@ class debugger {
         hookline();
       }
     } else if (ar->event == LUA_HOOKCALL) {
-      hookcall();
+      hookcall(L, ar);
     } else if (ar->event == LUA_HOOKRET) {
       hookret(L);
     }
@@ -1002,6 +1040,7 @@ class debugger {
   line_breakpoint_type line_breakpoints_;
   breakpoint_info* current_breakpoint_;
   int call_line_ = -1;
+  decltype(lua_Debug::i_ci) call_frame_{};  // a frame_key()
   pause_handler_type pause_handler_;
   tick_handler_type tick_handler_;
 };

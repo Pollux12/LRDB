@@ -157,6 +157,58 @@ TEST_F(DebuggerTest, StepOverTest) {
 
   ASSERT_EQ(require_line_number, break_line_numbers);
 }
+// LuaJIT reports the caller's line again when a C function such as math.max
+// returns, but sends no return event for it.
+TEST_F(DebuggerTest, BreakPointOnCFunctionCallLineHitsOncePerRun) {
+  const char* TEST_LUA_SCRIPT = "c_call_line_test.lua";
+  debugger.add_breakpoint(TEST_LUA_SCRIPT, 2);
+
+  int pauses = 0;
+  debugger.set_pause_handler([&](lrdb::debugger& debugger) {
+    ASSERT_EQ(2, debugger.current_debug_info().currentline());
+    ++pauses;
+  });
+
+  luaDofile(L, TEST_LUA_SCRIPT);
+
+  ASSERT_EQ(3, pauses);
+  ASSERT_EQ(3U, debugger.line_breakpoints()[0].hit_count);
+}
+TEST_F(DebuggerTest, ConditionOnCFunctionCallLineRunsOncePerRun) {
+  const char* TEST_LUA_SCRIPT = "c_call_line_test.lua";
+  // The condition counts its own evaluations and never pauses, like a logpoint.
+  debugger.add_breakpoint(TEST_LUA_SCRIPT, 2,
+                          "(function() _G.evaluations = (_G.evaluations or 0) + 1 end)() and false");
+
+  debugger.set_pause_handler([&](lrdb::debugger&) { FAIL(); });
+
+  luaDofile(L, TEST_LUA_SCRIPT);
+
+  lua_getglobal(L, "evaluations");
+  ASSERT_EQ(3, lua_tointeger(L, -1));
+  lua_pop(L, 1);
+}
+TEST_F(DebuggerTest, StepOverCFunctionCallLine) {
+  const char* TEST_LUA_SCRIPT = "c_call_line_test.lua";
+  debugger.add_breakpoint(TEST_LUA_SCRIPT, 2);
+
+  std::vector<int> break_line_numbers;
+  debugger.set_pause_handler([&](lrdb::debugger& debugger) {
+    break_line_numbers.push_back(debugger.current_debug_info().currentline());
+    if (break_line_numbers.size() == 1) {
+      debugger.clear_breakpoints();
+      debugger.step_over();
+    } else {
+      debugger.unpause();
+    }
+  });
+
+  luaDofile(L, TEST_LUA_SCRIPT);
+
+  // Without the fix LuaJIT stops on line 2 again after math.max returns.
+  std::vector<int> require_line_number = {2, 3};
+  ASSERT_EQ(require_line_number, break_line_numbers);
+}
 TEST_F(DebuggerTest, StepInTest) {
   const char* TEST_LUA_SCRIPT = "step_in_test1.lua";
   std::vector<int> break_line_numbers;
